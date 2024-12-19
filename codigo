@@ -1,0 +1,127 @@
+#aas importações necessarias
+from flask import Flask, request, jsonify
+import math
+from scipy.stats import norm
+from datetime import datetime
+import requests
+from pyngrok import ngrok
+
+#inicializando o Flask
+app = Flask(__name__)
+
+#configurando o authtoken do ngrok
+NGROK_AUTH_TOKEN = "2qRjz9PY1tGPe3cxKs6WNT9VCFq_2KRWuNuce5ntDVdjqmbVD"  # Substitua pelo seu authtoken
+ngrok.set_auth_token(NGROK_AUTH_TOKEN)
+
+# Rota inicial (raiz do servidor)
+@app.route('/')
+def home():
+    return "Bem-vindo ao Pine+, o assistente virtual do Banco Pine!"
+
+# Tratamento para favicon.ico
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
+
+#função Black-Scholes
+def black_scholes(S, X, T, r, sigma, option_type="call"):
+    d1 = (math.log(S / X) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+
+    if option_type == "call":
+        price = S * norm.cdf(d1) - X * math.exp(-r * T) * norm.cdf(d2)
+    elif option_type == "put":
+        price = X * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    else:
+        raise ValueError("O tipo da opção deve ser 'call' ou 'put'.")
+    
+    return price
+
+#função para obter cotações da API do Banco Central
+def get_bacen_rate(from_currency, to_currency):
+    """
+    Consulta cotações de câmbio na API do Banco Central do Brasil.
+    """
+    # O Banco Central só fornece cotações de USD e EUR em relação ao BRL
+    if from_currency == "BRL" and to_currency in ["USD", "EUR"]:
+        moeda = to_currency
+    elif to_currency == "BRL" and from_currency in ["USD", "EUR"]:
+        moeda = from_currency
+    else:
+        return {"error": "Conversão não suportada pela API do Banco Central."}
+
+    #data atual no formato exigido pela API (MM-DD-AAAA)
+    data_hoje = datetime.now().strftime("%m-%d-%Y")
+    url = (
+        f"https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/"
+        f"CotacaoMoedaDia(moeda=@moeda,dataCotacao=@dataCotacao)?@moeda='{moeda}'&@dataCotacao='{data_hoje}'"
+    )
+
+    try:
+        response = requests.get(url)
+        data = response.json()
+
+        if "value" in data and len(data["value"]) > 0:
+            cotacao = data["value"][0]["cotacaoCompra"]  # Pega a cotação de compra
+            return {"rate": cotacao}
+        else:
+            return {"error": "Nenhuma cotação encontrada para hoje."}
+    except Exception as e:
+        return {"error": str(e)}
+
+#endpoint de Black-Scholes
+@app.route('/black_scholes', methods=['POST'])
+def calculate_option():
+    data = request.json
+    S = data.get("S")
+    X = data.get("X")
+    T = data.get("T")
+    r = data.get("r")
+    sigma = data.get("sigma")
+    option_type = data.get("option_type", "call")
+    
+    try:
+        price = black_scholes(S, X, T, r, sigma, option_type)
+        return jsonify({"price": price})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+#endpoint para cotações de moedas usando o Banco Central
+@app.route('/currency_rate', methods=['POST'])
+def currency_rate():
+    data = request.json
+    from_currency = data.get("from_currency", "BRL")
+    to_currency = data.get("to_currency", "USD")
+    amount = data.get("amount", 1.0)
+
+    #busca cotações reais no Banco Central
+    result = get_bacen_rate(from_currency, to_currency)
+
+    if "error" in result:
+        return jsonify(result), 400
+
+    #caaaalcula o valor convertido
+    converted_amount = amount * result["rate"]
+    return jsonify({"rate": result["rate"], "converted_amount": converted_amount})
+
+#chatbot básico para interação
+@app.route('/chatbot', methods=['POST'])
+def chatbot():
+    user_input = request.json.get("message", "").lower()
+
+    if "cotação" in user_input or "moeda" in user_input:
+        return jsonify({"response": "Por favor, envie os parâmetros de moeda (ex.: 'BRL para USD') no formato JSON para obter a cotação."})
+    elif "simulação" in user_input or "black-scholes" in user_input:
+        return jsonify({"response": "Envie os parâmetros necessários para a simulação: S, X, T, r, sigma, e o tipo de opção (call ou put)."})
+    elif "ajuda" in user_input:
+        return jsonify({"response": "Sou Pine+, o assistente virtual do Banco Pine. Posso ajudar com cotações de moedas, simulações de investimentos e dúvidas gerais."})
+    else:
+        return jsonify({"response": "Desculpe, não entendi sua solicitação. Você pode perguntar sobre cotações, simulações ou ajuda geral."})
+
+#configuração do ngrok para expor o servidor
+public_url = ngrok.connect(5000)  # Porta do Flask
+print(f"Servidor público do ngrok: {public_url}")
+
+#rodar o servidor Flask
+if __name__ == '__main__':
+    app.run(port=5000)
